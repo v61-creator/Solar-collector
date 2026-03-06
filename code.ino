@@ -7,7 +7,7 @@
 #define SERVO_VERT_PIN 5  
 #define SERVO_HOR_PIN  6  
 #define ONE_WIRE_BUS   9  
-#define WIND_PIN       A6
+#define WIND_PIN       A4
 
 // RST=5, CLK=4, DAT=3
 iarduino_RTC time(RTC_DS1302, 5, 4, 3);
