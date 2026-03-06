@@ -36,7 +36,6 @@ String lastCriticalMode = "";
 
 void setup() {
   Serial.begin(9600);
-  time.begin();
   
   // Раскомментировать для настройки времени (сек, мин, час, день, мес, год, день_нед):
   // time.settime(0, 30, 12, 6, 3, 26, 6);
