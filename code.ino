@@ -8,7 +8,7 @@
 #define SERVO_VERT_PIN 5  
 #define SERVO_HOR_PIN  6  
 #define ONE_WIRE_BUS   9  
-#define WIND_PIN       A6 // Ветер на A6
+#define WIND_PIN       A6
 
 const float latitude = 55.75;
 const float longitude = 37.61;
