@@ -1,60 +1,79 @@
 #include <Servo.h>
 #include <OneWire.h>
 #include <DallasTemperature.h>
+#include <Wire.h>
+#include <RTClib.h>
+#include <EEPROM.h>
 
+#define SERVO_VERT_PIN 5  
+#define SERVO_HOR_PIN  6  
+#define ONE_WIRE_BUS   9  
+#define WIND_PIN       A6 // Ветер на A6
 
-#define SERVO_VERT_PIN 5  // Вертикальный серво (D5)
-#define SERVO_HOR_PIN  6  // Горизонтальный серво (D6)
-#define WIND_PIN       A4 // Потенциометр ветра (A4)
-#define ONE_WIRE_BUS   9  // Датчик температуры (D9)
-
-
-// Москва
 const float latitude = 55.75;
 const float longitude = 37.61;
 const int timezone = 3;
-
 
 OneWire oneWire(ONE_WIRE_BUS);
 DallasTemperature sensors(&oneWire);
 Servo servoVert;
 Servo servoHor;
+RTC_DS3231 rtc; 
 
-
-int angleVert = 90;
-int angleHor = 90;
-int tol = 10; // Чувствительность
-
+int currentVert = 90; 
+int currentHor = 90;
+int targetVert = 90;
+int targetHor = 90;
+int tol = 10; 
 
 unsigned long lastTempTime = 0;
 unsigned long lastPrintTime = 0;
 float currentTemp = -127.0;
 
 
+int eeAddress = 0; 
+String lastCriticalMode = ""; // Чтобы не спамить одно и то же событие
+
 void setup() {
   Serial.begin(9600);
- 
+  
   servoVert.attach(SERVO_VERT_PIN);
   servoHor.attach(SERVO_HOR_PIN);
- 
+  
+  servoVert.write(currentVert);
+  servoHor.write(currentHor);
+  
   pinMode(WIND_PIN, INPUT);
   sensors.begin();
- 
-  // Тестовое начальное движение
+  
+  if (!rtc.begin()) {
+    Serial.println(F("RTC ERROR! Check I2C wiring (A4, A5)."));
+  }
+  if (rtc.lostPower()) {
+    rtc.adjust(DateTime(F(__DATE__), F(__TIME__))); 
+  }
+
+  
+  EEPROM.get(1020, eeAddress);
+  if (eeAddress < 0 || eeAddress > 1000) eeAddress = 0;
+
   Serial.println(F("SYSTEM STARTUP..."));
-  servoVert.write(45); delay(600);
-  servoVert.write(90); delay(600);
+  Serial.println(F("Send 'R' in Serial Monitor to read EEPROM logs."));
 }
 
-
 void loop() {
-  // Фоторезисторы
+  if (Serial.available() > 0) {
+    char cmd = Serial.read();
+    if (cmd == 'R' || cmd == 'r') {
+      dumpEEPROM();
+    }
+  }
+
+  // Чтение датчиков
   int lt = analogRead(A0); int rt = analogRead(A1);
   int ld = analogRead(A2); int rd = analogRead(A3);
   int wind = analogRead(WIND_PIN);
-  
-  int avgLight = (lt + rt + ld + rd) / 4; // Средняя освещенность
-
+  int avgLight = (lt + rt + ld + rd) / 4; 
 
   // Температура
   if (millis() - lastTempTime > 2000) {
@@ -62,99 +81,114 @@ void loop() {
     currentTemp = sensors.getTempCByIndex(0);
     
     if (currentTemp > 80.0 && currentTemp != -127.0) {
-       angleVert = constrain(angleVert - 5, 0, 180); 
+       targetVert = constrain(targetVert - 5, 0, 90); 
     }
     lastTempTime = millis();
   }
 
+  String currentMode = "";
+  bool isCritical = false; // Флаг важного события
+  
+  // 1. Защита от ветра 
+  if (wind >= 800) {
+    targetVert = 90; 
+    currentMode = "STORM";
+    isCritical = true;
+  }
+  else if (currentTemp > 80.0 && currentTemp != -127.0) {
+    currentMode = "OVERHEAT";
+    isCritical = true;
+  }
+  // 2. Работа по часам
+  else if (avgLight < 30) { 
+    DateTime now = rtc.now(); 
+    float az, el;
+    calculateSolarPosition(now.hour(), now.minute(), now.day(), now.month(), latitude, longitude, &az, &el);
+    
+    if (el > 0) {
+      targetHor = map(constrain(az, 90, 270), 90, 270, 0, 180);
+      targetVert = constrain(el, 0, 90);
+    }
+    currentMode = "RTC_MATH";
+  }
+  // 3. Авто-трекинг по датчикам
+  else { 
+    int avt = (lt + rt) / 2; int avd = (ld + rd) / 2; 
+    int avl = (lt + ld) / 2; int avr = (rt + rd) / 2; 
 
+    if (abs(avt - avd) > tol) {
+      if (avt > avd) targetVert++; else targetVert--;
+    }
+    if (abs(avl - avr) > tol) {
+      if (avl > avr) targetHor--; else targetHor++;
+    }
+    currentMode = "TRACKING";
+  }
 
+  targetVert = constrain(targetVert, 0, 90); 
+  targetHor = constrain(targetHor, 0, 180);
+
+  if (currentVert < targetVert) currentVert++;
+  else if (currentVert > targetVert) currentVert--;
+  
+  if (currentHor < targetHor) currentHor++;
+  else if (currentHor > targetHor) currentHor--;
+
+  servoVert.write(currentVert);
+  servoHor.write(currentHor);
+
+  // Вывод в терминал (каждые 300 мс)
   if (millis() - lastPrintTime > 300) {
-    Serial.print(F(" [SYSTEM STATUS] "));
+    Serial.print(F("[LIVE] L:")); Serial.print(avgLight);
+    Serial.print(F(" | T:")); Serial.print(currentTemp, 1);
+    Serial.print(F(" | W:")); Serial.print(wind);
+    Serial.print(F(" | MODE:")); Serial.println(currentMode);
     
-    // Свет
-    Serial.print(F("| LIGHT: ")); 
-    Serial.print(avgLight);
-    Serial.print(F(" lx "));
-
-
-    // Температура
-    Serial.print(F(" | TEMP: "));
-    if (currentTemp == -127.0) Serial.print(F("ERR"));
-    else {
-      Serial.print(currentTemp, 1);
-      Serial.print(F(" C"));
-    }
-
-
-    // Ветер и Режим
-    Serial.print(F(" | WIND: "));
-    if (wind > 800) {
-      Serial.print(F("!! STORM !!"));
-      Serial.print(F(" | MODE: PROTECT"));
-    } else {
-      Serial.print(F("Stable"));
-      Serial.print(F(" | MODE: "));
-      if (avgLight > 30) Serial.print(F("AUTO-TRACKING"));
-      else Serial.print(F("MATH-CALC"));
-    }
-    
-    Serial.println(); // Перенос строки
     lastPrintTime = millis();
   }
 
-
-  // Защита от ветра
-  if (wind >= 800) {
-    servoVert.write(180); // Позиция "флюгера"
-    servoHor.write(90);
-    delay(40); 
-    return; // Пропускаем остальной код в этом цикле
+  
+  if (isCritical && currentMode != lastCriticalMode) {
+    DateTime now = rtc.now();
+    String logMsg = String(now.hour()) + ":" + String(now.minute()) + " " + currentMode;
+    saveToEEPROM(logMsg);
+    lastCriticalMode = currentMode;
+  } 
+  else if (!isCritical) {
+    lastCriticalMode = ""; // Сбрасываем, когда всё хорошо
   }
 
-
-  if (avgLight < 30) { 
-    // Эмуляция времени: Июнь, 12:00 (для теста)
-    int m = 6; int d = 21; int h = 12; int mn = 0;
-    
-    float az, el;
-    calculateSolarPosition(h, mn, d, m, latitude, longitude, &az, &el);
-    if (el > 0) {
-      angleHor = map(constrain(az, 90, 270), 90, 270, 0, 180);
-      angleVert = constrain(el, 0, 90);
-    }
-  }
-  else { 
-    // Слежение по датчикам
-    int avt = (lt + rt) / 2; // Верх
-    int avd = (ld + rd) / 2; // Низ
-    int avl = (lt + ld) / 2; // Лево
-    int avr = (rt + rd) / 2; // Право
-
-
-    if (abs(avt - avd) > tol) {
-      if (avt > avd) angleVert++; else angleVert--;
-    }
-    if (abs(avl - avr) > tol) {
-      if (avl > avr) angleHor--; else angleHor++;
-    }
-  }
-
-
-  // Ограничение углов и запись в серво
-  angleVert = constrain(angleVert, 0, 180);
-  angleHor = constrain(angleHor, 0, 180);
-
-
-  servoVert.write(angleVert);
-  servoHor.write(angleHor);
-
-
-  delay(40);
+  delay(40); 
 }
 
 
-// Математика
+void saveToEEPROM(String msg) {
+  Serial.println(">>> SAVING TO BLACK BOX: " + msg);
+  for (unsigned int i = 0; i < msg.length(); i++) {
+    EEPROM.update(eeAddress, msg[i]); // update бережет память, не пишет если символ тот же
+    eeAddress++;
+    if (eeAddress >= 1000) eeAddress = 0; // Кольцевой буфер
+  }
+  EEPROM.update(eeAddress, '\n'); // Перенос строки
+  eeAddress++;
+  if (eeAddress >= 1000) eeAddress = 0;
+  
+  // Запоминаем текущий адрес, чтобы не потерять после перезагрузки
+  EEPROM.put(1020, eeAddress); 
+}
+
+
+void dumpEEPROM() {
+  Serial.println(F("=== EEPROM LOG DUMP ==="));
+  for (int i = 0; i < 1000; i++) {
+    char c = EEPROM.read(i);
+    if (c == 255) continue; // Пропускаем пустые ячейки
+    Serial.print(c);
+  }
+  Serial.println(F("=== END OF DUMP ==="));
+}
+
+
 void calculateSolarPosition(int hr, int mn, int dy, int mo, float lat, float lon, float* az, float* el) {
   float utcHour = hr - timezone + (mn / 60.0);
   int N = dy + (31 * (mo - 1));
@@ -167,9 +201,4 @@ void calculateSolarPosition(int hr, int mn, int dy, int mo, float lat, float lon
   float decRad = declination * DEG_TO_RAD;
   float hrAngleRad = hourAngle * DEG_TO_RAD;
   float sinElevation = sin(latRad) * sin(decRad) + cos(latRad) * cos(decRad) * cos(hrAngleRad);
-  *el = asin(constrain(sinElevation, -1.0, 1.0)) * RAD_TO_DEG;
-  float cosAzimuth = (sin(decRad) - sin(latRad) * sin(sinElevation)) / (cos(latRad) * cos(asin(constrain(sinElevation, -1.0, 1.0))));
-  float azRaw = acos(constrain(cosAzimuth, -1.0, 1.0)) * RAD_TO_DEG;
-  if (hourAngle > 0) *az = 360.0 - azRaw; else *az = azRaw;
-}
-
+  *el = asin(constrain(sinElevation
