@@ -4,7 +4,7 @@
 #include <iarduino_RTC.h>
 #include <EEPROM.h>
 
-#define SERVO_VERT_PIN 5  
+#define SERVO_VERT_PIN 8 
 #define SERVO_HOR_PIN  6  
 #define ONE_WIRE_BUS   9  
 #define WIND_PIN       A4
@@ -29,6 +29,7 @@ int tol = 10;
 
 unsigned long lastTempTime = 0;
 unsigned long lastPrintTime = 0;
+unsigned long lastPosSaveTime = 0; // Таймер для сохранения позиции в EEPROM
 float currentTemp = -127.0;
 
 int eeAddress = 0; 
@@ -40,12 +41,24 @@ void setup() {
   // Раскомментировать для настройки времени (сек, мин, час, день, мес, год, день_нед):
   // time.settime(0, 30, 12, 6, 3, 26, 6);
   
-  servoVert.attach(SERVO_VERT_PIN);
-  servoHor.attach(SERVO_HOR_PIN);
+  // 1. Считываем последние позиции из EEPROM 
+  EEPROM.get(1010, currentVert); #эти номера для примера, чтоб протестить
+  EEPROM.get(1012, currentHor);
+
+  // 2. если EEPROM пустая или контроллер новый
+  if (currentVert < 0 || currentVert > 90) currentVert = 90;
+  if (currentHor < 0 || currentHor > 180) currentHor = 90;
+
+  // 3. Передаем позиции ДО attach, чтобы избежать стартового рывка
   servoVert.write(currentVert);
   servoHor.write(currentHor);
   
+  servoVert.attach(SERVO_VERT_PIN);
+  servoHor.attach(SERVO_HOR_PIN);
+  
   sensors.begin();
+  
+  
   EEPROM.get(1020, eeAddress);
   if (eeAddress < 0 || eeAddress > 1000) eeAddress = 0;
 }
@@ -100,6 +113,7 @@ void loop() {
   targetVert = constrain(targetVert, 0, 90); 
   targetHor = constrain(targetHor, 0, 180);
 
+  // движение по 1 градусу за цикл
   if (currentVert < targetVert) currentVert++;
   else if (currentVert > targetVert) currentVert--;
   if (currentHor < targetHor) currentHor++;
@@ -107,6 +121,13 @@ void loop() {
 
   servoVert.write(currentVert);
   servoHor.write(currentHor);
+
+  // Периодическое сохранение текущей позиции в память (каждые 5 минут)
+  if (millis() - lastPosSaveTime > 300000) {
+    EEPROM.put(1010, currentVert);
+    EEPROM.put(1012, currentHor);
+    lastPosSaveTime = millis();
+  }
 
   if (millis() - lastPrintTime > 300) {
     Serial.print(F("L:")); Serial.print(avgLight);
