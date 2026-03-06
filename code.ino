@@ -163,7 +163,7 @@ void loop() {
 
 
 void saveToEEPROM(String msg) {
-  Serial.println(">>> SAVING TO BLACK BOX: " + msg);
+  Serial.println(">>> SAVING: " + msg);
   for (unsigned int i = 0; i < msg.length(); i++) {
     EEPROM.update(eeAddress, msg[i]); // update бережет память, не пишет если символ тот же
     eeAddress++;
