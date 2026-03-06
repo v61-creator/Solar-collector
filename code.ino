@@ -9,6 +9,8 @@
 #define ONE_WIRE_BUS   9  
 #define WIND_PIN       A4
 
+// Настройка скорости сервоприводов
+const int SERVO_SPEED_MS = 150; // Миллисекунд на 1 градус. чем больше значение, тем больше плавность
 // RST=5, CLK=4, DAT=3
 iarduino_RTC time(RTC_DS1302, 5, 4, 3);
 
@@ -29,7 +31,7 @@ int tol = 10;
 
 unsigned long lastTempTime = 0;
 unsigned long lastPrintTime = 0;
-unsigned long lastPosSaveTime = 0; // Таймер для сохранения позиции в EEPROM
+unsigned long lastServoTime = 0;
 float currentTemp = -127.0;
 
 int eeAddress = 0; 
@@ -38,18 +40,9 @@ String lastCriticalMode = "";
 void setup() {
   Serial.begin(9600);
   
-  // Раскомментировать для настройки времени (сек, мин, час, день, мес, год, день_нед):
   // time.settime(0, 30, 12, 6, 3, 26, 6);
   
-  // 1. Считываем последние позиции из EEPROM 
-  EEPROM.get(1010, currentVert); #эти номера для примера, чтоб протестить
-  EEPROM.get(1012, currentHor);
-
-  // 2. если EEPROM пустая или контроллер новый
-  if (currentVert < 0 || currentVert > 90) currentVert = 90;
-  if (currentHor < 0 || currentHor > 180) currentHor = 90;
-
-  // 3. Передаем позиции ДО attach, чтобы избежать стартового рывка
+  // Начальную точка сервоприводов
   servoVert.write(currentVert);
   servoHor.write(currentHor);
   
@@ -58,7 +51,7 @@ void setup() {
   
   sensors.begin();
   
-  
+
   EEPROM.get(1020, eeAddress);
   if (eeAddress < 0 || eeAddress > 1000) eeAddress = 0;
 }
@@ -113,21 +106,20 @@ void loop() {
   targetVert = constrain(targetVert, 0, 90); 
   targetHor = constrain(targetHor, 0, 180);
 
-  // движение по 1 градусу за цикл
-  if (currentVert < targetVert) currentVert++;
-  else if (currentVert > targetVert) currentVert--;
-  if (currentHor < targetHor) currentHor++;
-  else if (currentHor > targetHor) currentHor--;
+  // Плавность движения серво
+  if (millis() - lastServoTime > SERVO_SPEED_MS) {
+    if (currentVert < targetVert) currentVert++;
+    else if (currentVert > targetVert) currentVert--;
+    
+    if (currentHor < targetHor) currentHor++;
+    else if (currentHor > targetHor) currentHor--;
 
-  servoVert.write(currentVert);
-  servoHor.write(currentHor);
-
-  // Периодическое сохранение текущей позиции в память (каждые 5 минут)
-  if (millis() - lastPosSaveTime > 300000) {
-    EEPROM.put(1010, currentVert);
-    EEPROM.put(1012, currentHor);
-    lastPosSaveTime = millis();
+    servoVert.write(currentVert);
+    servoHor.write(currentHor);
+    
+    lastServoTime = millis();
   }
+  // ----------------------------------------------------
 
   if (millis() - lastPrintTime > 300) {
     Serial.print(F("L:")); Serial.print(avgLight);
@@ -141,7 +133,8 @@ void loop() {
     lastCriticalMode = currentMode;
   } 
   else if (!isCritical) lastCriticalMode = "";
-  delay(40); 
+  
+  delay(10); // Уменьшил общий delay, чтобы не мешал таймерам
 }
 
 void saveToEEPROM(String msg) {
