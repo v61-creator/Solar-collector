@@ -10,7 +10,7 @@
 #define WIND_PIN       A6
 
 // Пины для DS1302: CLK, DAT, RST
-virtuabotixRTC myRTC(8, 7, 9); 
+virtuabotixRTC myRTC(5, 4, 3); 
 
 const float latitude = 55.75;
 const float longitude = 37.61;
