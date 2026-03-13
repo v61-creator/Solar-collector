@@ -26,10 +26,19 @@ const int HOR_MAX  = 180;
 
 
 // Калибровка датчиков
-const int OFFSET_TL =   0;
-const int OFFSET_TR =   0;
-const int OFFSET_BL =   0;
-const int OFFSET_BR =   0;
+// Офсеты для TL/TR/BL — простой сдвиг (датчики одинаковые)
+const int OFFSET_TL = 0;
+const int OFFSET_TR = 0;
+const int OFFSET_BL = 0;
+
+// Двухточечная калибровка BR: датчик другого типа, диапазон уже.
+// Замерить BR при полной темноте и при ярком свете впритык,
+// записать значения ADC и подставить сюда.
+const int BR_DARK   = 685;  // ADC BR в полной темноте
+const int BR_BRIGHT = 117;  // ADC BR при ярком свете
+// Эталонные значения остальных датчиков (среднее по замерам)
+const int REF_DARK   = 990; // ADC остальных в темноте
+const int REF_BRIGHT =   17; // ADC остальных при ярком свете
 
 
 // Параметры фильтрации
@@ -49,7 +58,7 @@ const long PRINT_INTERVAL = 2000;  // мс между выводом в терм
 const int  SEARCH_LIGHT_THR  = 700;   // ADC ниже → свет найден
 const long SEARCH_STABLE_MS  = 5000;  // мс стабильного сигнала → переход в TRACKING
 const int  SEARCH_STEP_MS    = 200;   // мс между шагами сканирования
-const int  SEARCH_VERT_POS   = 15;    // фиксированный угол подъёма во время поиска (°)
+const int  SEARCH_VERT_POS   = 30;    // фиксированный угол подъёма во время поиска (°)
 
 
 // RTC / координаты
@@ -88,6 +97,7 @@ TrackerMode currentMode = MODE_SEARCH;
 
 
 // Серво
+// Стартовая позиция: вертикаль 0°, горизонталь 90° (центр)
 int currentVert = 0;
 int currentHor  = 90;
 int targetVert  = 0;
@@ -179,9 +189,9 @@ void setup() {
   emaBL = readAvg(A0);
   emaBR = readAvg(A5);
 
-  // Начинаем с поиска — стартуем с левого края на фиксированной высоте
-  targetVert = SEARCH_VERT_POS;
-  targetHor  = HOR_MIN;
+  // Начинаем с поиска — стартуем с позиции 0°/0°
+  targetVert = 0;
+  targetHor  = 90;
 
   Serial.println(F("Солнечный трекер запущен. Отправьте 'R', чтобы посмотреть EEPROM."));
 }
@@ -199,7 +209,9 @@ void loop() {
   int rawTL = readAvg(A1) + OFFSET_TL;
   int rawTR = readAvg(A3) + OFFSET_TR;
   int rawBL = readAvg(A0) + OFFSET_BL;
-  int rawBR = readAvg(A5) + OFFSET_BR;
+  // Двухточечная калибровка BR: растягиваем диапазон до эталона
+  int rawBR = map(readAvg(A5), BR_BRIGHT, BR_DARK, REF_BRIGHT, REF_DARK);
+  rawBR     = constrain(rawBR, 0, 1023);
 
   emaTL = EMA_ALPHA * rawTL + (1.0 - EMA_ALPHA) * emaTL;
   emaTR = EMA_ALPHA * rawTR + (1.0 - EMA_ALPHA) * emaTR;
