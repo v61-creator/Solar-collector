@@ -1,59 +1,50 @@
 #include <Servo.h>
 #include <OneWire.h>
 #include <DallasTemperature.h>
-#include <Ds1302.h>
+#include <iarduino_RTC.h>
 #include <EEPROM.h>
 
 
-// Пины
+// ─── Пины ────────────────────────────────────────────────────────────────────
 #define SERVO_VERT_PIN  8
 #define SERVO_HOR_PIN   6
-#define ONE_WIRE_BUS    9
-#define WIND_PIN        A4
+#define ONE_WIRE_BUS    12
+#define WIND_PIN        A0
 // Датчики: TL=A1, BL=A0, TR=A3, BR=A5
 
 
-// Направление осей
+// ─── Направление осей ────────────────────────────────────────────────────────
 const bool INVERT_VERT = false;
 const bool INVERT_HOR  = true;
 
 
-// Механические ограничения
+// ─── Механические ограничения ────────────────────────────────────────────────
 const int VERT_MIN =  0;
 const int VERT_MAX = 90;
 const int HOR_MIN  =  0;
 const int HOR_MAX  = 180;
 
 
-// Калибровка датчиков
-// Офсеты для TL/TR/BL — простой сдвиг (датчики одинаковые)
-const int OFFSET_TL = 0;
-const int OFFSET_TR = 0;
-const int OFFSET_BL = 0;
-
-// Двухточечная калибровка BR: датчик другого типа, диапазон уже.
-// Замерить BR при полной темноте и при ярком свете впритык,
-// записать значения ADC и подставить сюда.
-const int BR_DARK   = 685;  // ADC BR в полной темноте
-const int BR_BRIGHT = 117;  // ADC BR при ярком свете
-// Эталонные значения остальных датчиков (среднее по замерам)
-const int REF_DARK   = 990; // ADC остальных в темноте
-const int REF_BRIGHT =   17; // ADC остальных при ярком свете
+// ─── Калибровка датчиков ─────────────────────────────────────────────────────
+const int OFFSET_TL =   0;
+const int OFFSET_TR =   0;
+const int OFFSET_BL =   0;
+const int OFFSET_BR = -120;
 
 
-// Параметры фильтрации
+// ─── Параметры фильтрации ─────────────────────────────────────────────────────
 const int   SAMPLES   = 8;     // замеров на одно считывание (убирает шум ~в 3 раза)
 const float EMA_ALPHA = 0.15;  // 0.1 = очень плавно, 0.4 = быстрее реагирует
 
 
-// Пороги и таймеры
+// ─── Пороги и таймеры ─────────────────────────────────────────────────────────
 const int  DARK_THRESHOLD = 980;   // ADC выше → считаем темно
 const int  SERVO_SPEED_MS = 40;    // мс между шагами серво
 const int  TRACK_INTERVAL = 250;   // мс между пересчётом цели трекинга
 const long PRINT_INTERVAL = 2000;  // мс между выводом в терминал
 
 
-// Параметры SEARCH
+// ─── Параметры SEARCH ─────────────────────────────────────────────────────────
 // Поиск: горизонтальное сканирование до нахождения стабильного сигнала.
 const int  SEARCH_LIGHT_THR  = 700;   // ADC ниже → свет найден
 const long SEARCH_STABLE_MS  = 5000;  // мс стабильного сигнала → переход в TRACKING
@@ -61,28 +52,21 @@ const int  SEARCH_STEP_MS    = 200;   // мс между шагами скани
 const int  SEARCH_VERT_POS   = 30;    // фиксированный угол подъёма во время поиска (°)
 
 
-// RTC / координаты
-// Ds1302(RST=3, CLK=5, DAT=4)
-Ds1302 rtc(3, 5, 4);
-Ds1302::DateTime rtcDt;   // глобальная структура — заполняется в начале loop()
-
-// Раскомментировать строку rtc.setDateTime() в setup(), загрузить,
-// затем снова закомментировать и загрузить ещё раз — иначе время
-// будет сбрасываться при каждом включении.
-
+// ─── RTC / координаты ─────────────────────────────────────────────────────────
+iarduino_RTC time(RTC_DS1302, 5, 4, 3);
 const float LATITUDE  = 55.75;
 const float LONGITUDE = 37.61;
 const int   TIMEZONE  = 3;
 
 
-// Объекты
+// ─── Объекты ──────────────────────────────────────────────────────────────────
 OneWire          oneWire(ONE_WIRE_BUS);
 DallasTemperature sensors(&oneWire);
 Servo servoVert;
 Servo servoHor;
 
 
-// Режимы работы (enum вместо String — нет фрагментации heap)
+// ─── Режимы работы (enum вместо String — нет фрагментации heap) ──────────────
 enum TrackerMode : uint8_t {
   MODE_SEARCH,     // поиск солнца горизонтальным сканированием
   MODE_TRACKING,   // активный трекинг по фоторезисторам
@@ -96,44 +80,43 @@ enum TrackerMode : uint8_t {
 TrackerMode currentMode = MODE_SEARCH;
 
 
-// Серво
-// Стартовая позиция: вертикаль 0°, горизонталь 90° (центр)
+// ─── Серво ────────────────────────────────────────────────────────────────────
 int currentVert = 0;
 int currentHor  = 90;
 int targetVert  = 0;
 int targetHor   = 90;
 
 
-// EMA
+// ─── EMA ──────────────────────────────────────────────────────────────────────
 float emaTL = 512, emaTR = 512, emaBL = 512, emaBR = 512;
 
 
-// Состояние MODE_SEARCH
+// ─── Состояние MODE_SEARCH ────────────────────────────────────────────────────
 int           searchDir        = 1;     // направление сканирования: +1 или -1
 bool          searchFoundLight = false; // видим ли сейчас достаточно света
 unsigned long searchStableStart = 0;    // момент, когда свет нашли
 unsigned long searchStepTimer   = 0;    // таймер шага сканирования
 
 
-// Состояние MODE_WAIT_RTC
+// ─── Состояние MODE_WAIT_RTC ──────────────────────────────────────────────────
 unsigned long rtcDelayTimer = 0;
 
 
-// Таймеры общие
+// ─── Таймеры общие ────────────────────────────────────────────────────────────
 unsigned long lastTempTime  = 0;
 unsigned long lastPrintTime = 0;
 unsigned long lastServoTime = 0;
 unsigned long lastTrackTime = 0;
 
 
-// Прочее
+// ─── Прочее ───────────────────────────────────────────────────────────────────
 float       currentTemp       = -127.0;
 int         eeAddress         = 0;
 bool        lastWasCritical   = false;
 TrackerMode lastSavedCritical = MODE_TRACKING; // не критичный режим = заглушка
 
 
-// Прототипы
+// ─── Прототипы ────────────────────────────────────────────────────────────────
 int  readAvg(uint8_t pin);
 int  dayOfYear(int dy, int mo);
 void saveToEEPROM(const char* msg);
@@ -144,7 +127,7 @@ void calculateSolarPosition(int hr, int mn, int dy, int mo,
 const __FlashStringHelper* modeToString(TrackerMode m);
 
 
-
+// ─────────────────────────────────────────────────────────────────────────────
 // Многократное считывание: усредняем SAMPLES замеров — убирает случайный шум.
 int readAvg(uint8_t pin) {
   long sum = 0;
@@ -162,7 +145,7 @@ int dayOfYear(int dy, int mo) {
 }
 
 
-
+// ─────────────────────────────────────────────────────────────────────────────
 void setup() {
   Serial.begin(9600);
 
@@ -173,45 +156,36 @@ void setup() {
 
   sensors.begin();
 
-  // RTC init
-  rtc.init();
-  // !! УСТАНОВИТЬ СВОЁ ВРЕМЯ — раскомментируй, загрузи, закомментируй снова !!
-  // Ds1302::DateTime setDt = {25, 3, 13, 4, 14, 15, 0};
-  // year mo day dow hr  min sec  (dow: 1=пн..7=вс)
-  // rtc.setDateTime(&setDt);
-
   EEPROM.get(1020, eeAddress);
   if (eeAddress < 0 || eeAddress > 1000) eeAddress = 0;
 
   // Инициализируем EMA реальными значениями, а не 512
   emaTL = readAvg(A1);
-  emaTR = readAvg(A3);
-  emaBL = readAvg(A0);
-  emaBR = readAvg(A5);
+  emaTR = readAvg(A2);
+  emaBL = readAvg(A3);
+  emaBR = readAvg(A4);
 
-  // Начинаем с поиска — стартуем с позиции 0°/0°
-  targetVert = 0;
-  targetHor  = 90;
+  // Начинаем с поиска — стартуем с левого края на фиксированной высоте
+  targetVert = SEARCH_VERT_POS;
+  targetHor  = HOR_MIN;
 
   Serial.println(F("Солнечный трекер запущен. Отправьте 'R', чтобы посмотреть EEPROM."));
 }
 
 
-
+// ─────────────────────────────────────────────────────────────────────────────
 void loop() {
   if (Serial.available() > 0) {
     if (Serial.read() == 'R') dumpEEPROM();
   }
 
-  rtc.getDateTime(&rtcDt);
+  time.gettime();
 
-  // Чтение + фильтрация датчиков
+  // ── Чтение + фильтрация датчиков ────────────────────────────────────────
   int rawTL = readAvg(A1) + OFFSET_TL;
   int rawTR = readAvg(A3) + OFFSET_TR;
   int rawBL = readAvg(A0) + OFFSET_BL;
-  // Двухточечная калибровка BR: растягиваем диапазон до эталона
-  int rawBR = map(readAvg(A5), BR_BRIGHT, BR_DARK, REF_BRIGHT, REF_DARK);
-  rawBR     = constrain(rawBR, 0, 1023);
+  int rawBR = readAvg(A5) + OFFSET_BR;
 
   emaTL = EMA_ALPHA * rawTL + (1.0 - EMA_ALPHA) * emaTL;
   emaTR = EMA_ALPHA * rawTR + (1.0 - EMA_ALPHA) * emaTR;
@@ -226,14 +200,14 @@ void loop() {
   int wind     = analogRead(WIND_PIN);
   int avgLight = (tl + tr + bl + br) / 4;
 
-  // Температура раз в 2 сек
+  // ── Температура раз в 2 сек ─────────────────────────────────────────────
   if (millis() - lastTempTime > 2000) {
     sensors.requestTemperatures();
     currentTemp  = sensors.getTempCByIndex(0);
     lastTempTime = millis();
   }
 
-  // Критические режимы (наивысший приоритет)
+  // ── Критические режимы (наивысший приоритет) ────────────────────────────
   bool isCritical = false;
 
   if (wind >= 800) {
@@ -255,7 +229,7 @@ void loop() {
     isCritical = true;
   }
   else {
-    // Выход из критического режима → SEARCH (переориентация)
+    // ── Выход из критического режима → SEARCH (переориентация) ──────────
     // Панель могла сдвинуться — не знаем, где солнце → ищем заново.
     if (currentMode == MODE_STORM || currentMode == MODE_OVERHEAT) {
       currentMode      = MODE_SEARCH;
@@ -265,10 +239,10 @@ void loop() {
       targetHor        = HOR_MIN;
     }
 
-    // Конечный автомат режимов
+    // ── Конечный автомат режимов ─────────────────────────────────────────
     switch (currentMode) {
 
-      // ПОИСК
+      // ── ПОИСК ────────────────────────────────────────────────────────────
       // Горизонтальное сканирование. Нашли стабильный свет 5 с → TRACKING.
       // Дошли до края, RTC говорит ночь → NIGHT.
       case MODE_SEARCH: {
@@ -298,8 +272,8 @@ void loop() {
               // Дошли до края — проверяем RTC
               targetHor = constrain(targetHor, HOR_MIN, HOR_MAX);
               float az, el;
-              calculateSolarPosition(rtcDt.hour, rtcDt.minute,
-                                     rtcDt.day, rtcDt.month,
+              calculateSolarPosition(time.Hours, time.minutes,
+                                     time.day, time.month,
                                      LATITUDE, LONGITUDE, &az, &el);
               if (el <= 0) {
                 // RTC говорит ночь → паркуемся
@@ -316,7 +290,7 @@ void loop() {
         break;
       }
 
-      // ТРЕКИНГ
+      // ── ТРЕКИНГ ──────────────────────────────────────────────────────────
       // Основной режим. Потеряли солнце → WAIT_RTC.
       case MODE_TRACKING: {
         if (avgLight > DARK_THRESHOLD) {
@@ -356,7 +330,7 @@ void loop() {
         break;
       }
 
-      // ОЖИДАНИЕ RTC
+      // ── ОЖИДАНИЕ RTC ─────────────────────────────────────────────────────
       // 20 секунд после потери солнца: облако или закат?
       case MODE_WAIT_RTC: {
         if (avgLight <= DARK_THRESHOLD) {
@@ -366,8 +340,8 @@ void loop() {
         }
         if (millis() - rtcDelayTimer > 20000) {
           float az, el;
-          calculateSolarPosition(rtcDt.hour, rtcDt.minute,
-                                 rtcDt.day, rtcDt.month,
+          calculateSolarPosition(time.Hours, time.minutes,
+                                 time.day, time.month,
                                  LATITUDE, LONGITUDE, &az, &el);
           currentMode = (el > 0) ? MODE_RTC : MODE_NIGHT;
           if (currentMode == MODE_NIGHT) {
@@ -387,8 +361,8 @@ void loop() {
           break;
         }
         float az, el;
-        calculateSolarPosition(rtcDt.hour, rtcDt.minute,
-                               rtcDt.day, rtcDt.month,
+        calculateSolarPosition(time.Hours, time.minutes,
+                               time.day, time.month,
                                LATITUDE, LONGITUDE, &az, &el);
         if (el <= 0) {
           currentMode = MODE_NIGHT;
@@ -405,8 +379,8 @@ void loop() {
       // Ждём рассвета по RTC → SEARCH.
       case MODE_NIGHT: {
         float az, el;
-        calculateSolarPosition(rtcDt.hour, rtcDt.minute,
-                               rtcDt.day, rtcDt.month,
+        calculateSolarPosition(time.Hours, time.minutes,
+                               time.day, time.month,
                                LATITUDE, LONGITUDE, &az, &el);
         if (el > 0) {
           // Рассвет — начинаем поиск с нуля
@@ -427,7 +401,7 @@ void loop() {
   targetVert = constrain(targetVert, VERT_MIN, VERT_MAX);
   targetHor  = constrain(targetHor,  HOR_MIN,  HOR_MAX);
 
-  // Плавное движение серво (write только при изменении)
+  //  Плавное движение серво
   if (millis() - lastServoTime > SERVO_SPEED_MS) {
     int newVert = currentVert;
     int newHor  = currentHor;
@@ -458,15 +432,15 @@ void loop() {
     if (currentMode == MODE_RTC   || currentMode == MODE_WAIT_RTC ||
         currentMode == MODE_NIGHT || currentMode == MODE_SEARCH) {
       float az, el;
-      calculateSolarPosition(rtcDt.hour, rtcDt.minute,
-                             rtcDt.day, rtcDt.month,
+      calculateSolarPosition(time.Hours, time.minutes,
+                             time.day, time.month,
                              LATITUDE, LONGITUDE, &az, &el);
       Serial.print(F("  Time: "));
-      Serial.print(rtcDt.day);   Serial.print(F("."));
-      Serial.print(rtcDt.month); Serial.print(F(" "));
-      Serial.print(rtcDt.hour); Serial.print(F(":"));
-      if (rtcDt.minute < 10) Serial.print(F("0"));
-      Serial.print(rtcDt.minute);
+      Serial.print(time.day);   Serial.print(F("."));
+      Serial.print(time.month); Serial.print(F(" "));
+      Serial.print(time.Hours); Serial.print(F(":"));
+      if (time.minutes < 10) Serial.print(F("0"));
+      Serial.print(time.minutes);
       Serial.print(F(" | Az:")); Serial.print(az, 1);
       Serial.print(F(" El:"));   Serial.println(el, 1);
     }
@@ -474,13 +448,12 @@ void loop() {
     lastPrintTime = millis();
   }
 
-  // EEPROM лог критических событий
-  // FIX: char buf[] вместо String — нет фрагментации heap
+  // EEPROM лог
   if (isCritical) {
     if (!lastWasCritical || currentMode != lastSavedCritical) {
       char buf[24];
       snprintf(buf, sizeof(buf), "%02d:%02d %s",
-               rtcDt.hour, rtcDt.minute,
+               time.Hours, time.minutes,
                (currentMode == MODE_STORM) ? "STORM" : "OVERHEAT");
       saveToEEPROM(buf);
       lastSavedCritical = currentMode;
@@ -492,9 +465,6 @@ void loop() {
 }
 
 
-// Вспомогательные функции
-
-// FIX: const char* вместо String — нет выделения heap
 void saveToEEPROM(const char* msg) {
   for (int i = 0; msg[i] != '\0'; i++) {
     EEPROM.update(eeAddress, msg[i]);
@@ -514,7 +484,7 @@ void dumpEEPROM() {
   Serial.println(F("=== END ==="));
 }
 
-// Строки режимов хранятся во flash, а не в RAM
+
 const __FlashStringHelper* modeToString(TrackerMode m) {
   switch (m) {
     case MODE_SEARCH:   return F("SEARCH");
@@ -535,7 +505,6 @@ void calculateSolarPosition(int hr, int mn, int dy, int mo,
   float utcHour = hr - TIMEZONE + (mn / 60.0);
   if (utcHour < 0) utcHour += 24.0;
 
-  // FIX: точный день года вместо приближения 31*(mo-1)
   int   N    = dayOfYear(dy, mo);
   float decl = 23.45 * sin((360.0 / 365.0) * (N - 81) * DEG_TO_RAD);
   float b    = (360.0 / 364.0) * (N - 81);
