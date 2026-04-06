@@ -10,7 +10,7 @@
 #define SERVO_HOR_PIN   6
 #define ONE_WIRE_BUS    12
 #define WIND_PIN        A0
-// Фоторезисторы: TL=A1, BL=A0, TR=A3, BR=A5
+// Фоторезисторы: TL=A1, BL=A3, TR=A2, BR=A4
 
 
 // Направление осей
@@ -178,9 +178,9 @@ void loop() {
 
   // Чтение и фильтрация датчиков
   int rawTL = readAvg(A1) + OFFSET_TL;
-  int rawTR = readAvg(A3) + OFFSET_TR;
-  int rawBL = readAvg(A0) + OFFSET_BL;
-  int rawBR = readAvg(A5) + OFFSET_BR;
+  int rawTR = readAvg(A2) + OFFSET_TR;
+  int rawBL = readAvg(A3) + OFFSET_BL;
+  int rawBR = readAvg(A4) + OFFSET_BR;
 
   emaTL = EMA_ALPHA * rawTL + (1.0 - EMA_ALPHA) * emaTL;
   emaTR = EMA_ALPHA * rawTR + (1.0 - EMA_ALPHA) * emaTR;
